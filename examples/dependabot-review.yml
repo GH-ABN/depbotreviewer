@@ -35,19 +35,19 @@ jobs:
     steps:
       # No `ref:` on purpose. On pull_request this checks out the PR merged into the
       # latest base branch, which is what will land. On merge_group it checks out the queue's commit.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       # --- Your toolchain. Pick what your project needs. ---
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
       # - uses: actions/setup-dotnet@v4
       #   with: { dotnet-version: 9.0.x }
-      # - uses: actions/setup-python@v5
+      # - uses: actions/setup-python@v7
       #   with: { python-version: "3.12" }
 
       - uses: GH-ABN/depbotreviewer@v1

@@ -1,51 +1,70 @@
 # Runs the gate from this repository (uses: ./) on Dependabot PRs opened against this
 # repository: the testbed bumps (see testbed/README.md) and bumps to the action's own deps.
+# Uses the recommended two-job setup (examples/dependabot-review-two-jobs.yml), so the
+# PR's code and the API key never share a job.
 # Requires ANTHROPIC_API_KEY as a Dependabot secret in this repository.
 name: Self-test
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: PR number to re-review
-        required: true
-
-permissions:
-  contents: write # auto-merge
-  pull-requests: write
-  issues: write
 
 jobs:
-  dependabot-gate:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.user.login == 'dependabot[bot]'
+  # Runs the PR's code with no credentials and uploads the result.
+  dependabot-test:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
+    permissions:
+      contents: read
     concurrency:
-      group: self-test-${{ github.event.pull_request.number || inputs.pr_number }}
+      group: self-test-test-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     steps:
-      # The PR merged into main: the default on pull_request, set explicitly for manual re-runs.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/pull/{0}/merge', inputs.pr_number) || '' }}
           fetch-depth: 0
           persist-credentials: false
-
       - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - uses: ./
+        with:
+          mode: test
+          test-command: bash scripts/self-test.sh
 
+  # Never runs the PR's code: reviews it with the test job's result, then comments,
+  # labels and auto-merges.
+  dependabot-review:
+    needs: dependabot-test
+    # Runs when the test job failed (no result means needs-human), but not when a newer
+    # push cancelled it: the newer run reviews the new head.
+    if: ${{ !cancelled() && needs.dependabot-test.result != 'cancelled' && github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # auto-merge
+      pull-requests: write
+      issues: write
+    concurrency:
+      group: self-test-review-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
       - uses: ./
         id: gate
         with:
+          mode: review
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
-          test-command: bash scripts/self-test.sh
-          pr-number: ${{ inputs.pr_number }}
           # This repo checks the gate's judgement, so never fail the job on a verdict.
           fail-on: never
           # Show the ticket text on needs-human PRs (ms) as well as fails (chalk).
@@ -57,4 +76,4 @@ jobs:
 
       - name: Show verdict
         if: always()
-        run: echo "verdict=${{ steps.gate.outputs.verdict }} risk=${{ steps.gate.outputs.risk }}"
+        run: echo "verdict=${{ steps.gate.outputs.verdict }} risk=${{ steps.gate.outputs.risk }} merged=${{ steps.gate.outputs.merged }}"

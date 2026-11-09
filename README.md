@@ -142,6 +142,8 @@ No tracker credentials are needed, because the action never calls Linear or Jira
 - Claude's repository tools are **read-only** and confined to the checkout; they can't read `.git`. Claude has no shell. Your `test-command` is the only thing that runs code. Its own environment has no credentials, but see the next point.
 - The PR description, release notes, web pages and repository contents are treated as untrusted data. The prompt tells Claude to ignore instructions inside them and report any such attempt. Text Claude writes into the comment can't @-mention people.
 - With `mode: test` and `mode: review`, the PR's code runs in a job that holds no credentials. In a single job (`mode: all`), the dependency being tested can read the credential from the action's process environment.
+- Tests aren't a defence against a malicious update. Code that runs during the tests can make them pass, or write a passing result in `mode: test`. Tests catch accidental breakage. Claude's review of the upstream changes is what looks for malicious ones.
+- Pin the action to a tag or commit, such as `GH-ABN/depbotreviewer@v1`. This repository's own self-test is the exception: it runs the action from the checkout (`uses: ./`), so a Dependabot bump to the action's own dependencies (its Python packages or the Claude Code CLI) is installed and run in the job that holds the credential.
 - The workflow uses `pull_request`, not `pull_request_target`.
 - The reviewer runs with Python's `-P` flag, so files in the reviewed repository can't replace the reviewer's own modules.
 

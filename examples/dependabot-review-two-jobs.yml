@@ -27,11 +27,11 @@ jobs:
       group: dependabot-test-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: GH-ABN/depbotreviewer@v1
@@ -43,10 +43,11 @@ jobs:
   # changes, then comments, labels and (optionally) auto-merges.
   dependabot-review:
     needs: dependabot-test
-    # !cancelled(): if the test job fails, the review still runs and gives needs-human
-    # instead of being skipped (a skipped required check counts as passed). A test job
-    # cancelled by a newer push doesn't get a review: the newer run reviews the new head.
-    if: ${{ !cancelled() && (github.event_name == 'merge_group' || github.event.pull_request.user.login == 'dependabot[bot]') }}
+    # If the test job fails, the review still runs and gives needs-human instead of being
+    # skipped (a skipped required check counts as passed). A test job cancelled by a newer
+    # push doesn't get a review: the newer run reviews the new head. cancelled() only sees
+    # a cancelled workflow, so the test job's own result is checked too.
+    if: ${{ !cancelled() && needs.dependabot-test.result != 'cancelled' && (github.event_name == 'merge_group' || github.event.pull_request.user.login == 'dependabot[bot]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -57,12 +58,12 @@ jobs:
       group: dependabot-review-${{ github.event.pull_request.number || github.ref }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
       # Only for claude-code-oauth-token, which installs the Claude Code CLI with npm.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - uses: GH-ABN/depbotreviewer@v1
