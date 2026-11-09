@@ -50,7 +50,7 @@ jobs:
           fail-on: never
           # Show the ticket text on needs-human PRs (ms) as well as fails (chalk).
           ticket-on: needs-human
-          # Patch updates the gate passes with high confidence merge themselves (escape-html);
+          # Patch updates the gate passes with high confidence merge themselves (vary);
           # minor and major (ms, chalk) always wait for a human here.
           auto-merge: true
           auto-merge-update-types: patch
