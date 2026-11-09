@@ -7,6 +7,12 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
 
+  # The Claude Code CLI the Claude Code engine installs (claude-code/package-lock.json).
+  - package-ecosystem: npm
+    directory: /claude-code
+    schedule:
+      interval: weekly
+
   # The action's own Python dependencies: the gate reviews bumps to itself.
   - package-ecosystem: pip
     directory: /

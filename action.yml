@@ -9,11 +9,41 @@ branding:
   color: orange
 
 inputs:
+  mode:
+    description: >-
+      `all` (default): one job builds, tests and reviews. `test` and `review` split that
+      over two jobs so the PR's code never runs where a credential is: the `test` job runs
+      test-command with no credentials and uploads the result; the `review` job, which
+      needs the test job, gets the credentials, downloads the result and never runs the
+      PR's code. Required for claude-code-oauth-token with a test-command. See README.
+    required: false
+    default: all
+  test-artifact:
+    description: Name of the artifact that carries the test result from the test job to the review job.
+    required: false
+    default: dependabot-gate-test
   anthropic-api-key:
     description: >-
       Anthropic API key. Dependabot-triggered workflows can only read Dependabot secrets,
-      so store it under Settings > Secrets and variables > Dependabot.
-    required: true
+      so store it under Settings > Secrets and variables > Dependabot. Set this or
+      claude-code-oauth-token.
+    required: false
+    default: ""
+  claude-code-oauth-token:
+    description: >-
+      Claude Code OAuth token (from `claude setup-token`), used instead of an API key.
+      The review then runs through the Claude Code CLI with the same prompt, tools and
+      verdict rules. Store it as a Dependabot secret too. Set this or anthropic-api-key.
+    required: false
+    default: ""
+  web-fetch-domains:
+    description: >-
+      Claude Code engine only: comma-separated hosts that WebFetch may read, such as
+      github.com. Any other URL is refused, so text planted in a changelog cannot have
+      Claude send your code to another host. Empty uses the built-in list of source
+      hosts and package registries (see README).
+    required: false
+    default: ""
   github-token:
     description: Token used to read the PR and post the comment and labels.
     required: false
@@ -137,12 +167,54 @@ runs:
         "$RUNNER_TEMP/dep-reviewer-venv/bin/pip" install --quiet --disable-pip-version-check \
           -r "$GITHUB_ACTION_PATH/requirements.txt"
 
+    - name: Download the test result
+      if: inputs.mode == 'review' && github.event_name != 'merge_group'
+      # A missing result (the test job failed or was cancelled) is handled by the review:
+      # no tests means no pass.
+      continue-on-error: true
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.test-artifact }}
+        path: ${{ runner.temp }}/dep-review-test-result
+
+    - name: Install Claude Code
+      id: claude-code
+      if: inputs.claude-code-oauth-token != '' && inputs.mode != 'test'
+      shell: bash
+      # Installed from the action's own lockfile (claude-code/), which pins the CLI and its
+      # platform packages by integrity hash, into a new directory outside the checkout:
+      # npm reads .npmrc from its working directory, so running it in the reviewed repo
+      # would let that repo pick the registry. User and global npm config are ignored too.
+      env:
+        npm_config_registry: https://registry.npmjs.org/
+      run: |
+        set -euo pipefail
+        if ! command -v npm >/dev/null; then
+          echo "::error::claude-code-oauth-token needs npm on the runner to install Claude Code (add actions/setup-node)."
+          exit 1
+        fi
+        dir="$(mktemp -d "$RUNNER_TEMP/dep-reviewer-claude-code.XXXXXX")"
+        cp "$GITHUB_ACTION_PATH/claude-code/package.json" "$GITHUB_ACTION_PATH/claude-code/package-lock.json" "$dir/"
+        # Empty user and global config files (npm refuses the same file for both).
+        : > "$dir/.user-npmrc"; : > "$dir/.global-npmrc"
+        export npm_config_userconfig="$dir/.user-npmrc" npm_config_globalconfig="$dir/.global-npmrc"
+        cd "$dir"
+        npm ci --no-audit --no-fund --loglevel=error
+        "$dir/node_modules/.bin/claude" --version
+        echo "bin=$dir/node_modules/.bin/claude" >> "$GITHUB_OUTPUT"
+
     - name: Review with Claude
       id: review
       shell: bash
       env:
         INPUT_ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
-        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_CLAUDE_CODE_OAUTH_TOKEN: ${{ inputs.claude-code-oauth-token }}
+        DEP_REVIEWER_CLAUDE_BIN: ${{ steps.claude-code.outputs.bin }}
+        INPUT_WEB_FETCH_DOMAINS: ${{ inputs.web-fetch-domains }}
+        # mode: test runs the PR's code, so it gets no token, except in a merge queue, which
+        # needs one to look up the queued PR and only runs code that is about to land.
+        INPUT_GITHUB_TOKEN: ${{ (inputs.mode != 'test' || github.event_name == 'merge_group') && inputs.github-token || '' }}
+        INPUT_MODE: ${{ inputs.mode }}
         INPUT_MODEL: ${{ inputs.model }}
         INPUT_EFFORT: ${{ inputs.effort }}
         INPUT_MAX_TURNS: ${{ inputs.max-turns }}
@@ -162,3 +234,12 @@ runs:
       # so a file in the reviewed repo cannot shadow one of the reviewer's imports.
       run: |
         PYTHONPATH="$GITHUB_ACTION_PATH/src" "$RUNNER_TEMP/dep-reviewer-venv/bin/python" -P -m dep_reviewer
+
+    - name: Upload the test result
+      if: always() && inputs.mode == 'test' && github.event_name != 'merge_group'
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.test-artifact }}
+        path: ${{ runner.temp }}/dep-review-test-result
+        if-no-files-found: ignore
+        retention-days: 1

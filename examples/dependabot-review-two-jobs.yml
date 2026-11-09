@@ -1,0 +1,73 @@
+# Two-job version of dependabot-review.yml: the PR's code and the credentials never
+# share a job. Required with claude-code-oauth-token, recommended with an API key.
+# Copy to .github/workflows/ and set the toolchain steps and test-command.
+#
+# Setup as in dependabot-review.yml, with one difference for branch protection: require
+# both checks, "dependabot-test" and "dependabot-review". The review job gives the verdict
+# on pull requests; in a merge queue the test job is the one that re-runs the tests, and
+# the review job does nothing, so requiring only the review check would let the queue
+# merge a commit whose tests failed.
+name: Dependabot gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  merge_group:
+
+jobs:
+  # Runs the PR's code. No credentials: not the Claude token, and no GitHub token
+  # outside a merge queue.
+  dependabot-test:
+    if: github.event_name == 'merge_group' || github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    concurrency:
+      group: dependabot-test-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: GH-ABN/depbotreviewer@v1
+        with:
+          mode: test
+          test-command: npm ci && npm test
+
+  # Never runs the PR's code: reads the checkout, the test result and the upstream
+  # changes, then comments, labels and (optionally) auto-merges.
+  dependabot-review:
+    needs: dependabot-test
+    # !cancelled(): if the test job fails, the review still runs and gives needs-human
+    # instead of being skipped (a skipped required check counts as passed). A test job
+    # cancelled by a newer push doesn't get a review: the newer run reviews the new head.
+    if: ${{ !cancelled() && (github.event_name == 'merge_group' || github.event.pull_request.user.login == 'dependabot[bot]') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # auto-merge; `read` without it
+      pull-requests: write
+      issues: write
+    concurrency:
+      group: dependabot-review-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Only for claude-code-oauth-token, which installs the Claude Code CLI with npm.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: GH-ABN/depbotreviewer@v1
+        with:
+          mode: review
+          claude-code-oauth-token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # or: anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          auto-merge: true

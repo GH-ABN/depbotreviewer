@@ -13,6 +13,7 @@ from pathlib import Path
 import anthropic
 
 from .claude_review import ReviewError, ReviewOutcome, run_review
+from .claude_code_review import run_review_cli
 from .config import Config, ConfigError, should_fail
 from .gate import (
     PASS,
@@ -28,6 +29,7 @@ from .github_api import GitHub, GitHubError
 from .prompts import SYSTEM_PROMPT, CheckRun, build_user_message
 from .repo_tools import RepoTools
 from .report import COMMENT_MARKER, LABEL_COLORS, LABEL_DESCRIPTIONS, RenderContext, render_comment
+from .test_result import LOG_FILE, TestResultError, checkout_for_review, load_test_result, write_test_result
 from .tickets import build_content, render_ticket_section
 
 LOG_TAIL_LINES = 150
@@ -114,6 +116,33 @@ def run_merge_queue(cfg: Config, gh: GitHub, event: dict) -> int:
     return 1 if should_fail(verdict, cfg.fail_on) else 0
 
 
+def run_test_job(cfg: Config, event: dict) -> int:
+    """mode: test. Build and test the PR, and leave the result for the mode: review job.
+
+    Holds no credentials: the PR's code runs here. Everything comes from the event."""
+    pr = event.get("pull_request") or {}
+    number = pr.get("number")
+    if not number:
+        raise ConfigError("mode: test runs on the pull_request event (workflow_dispatch isn't supported)")
+    author = ((pr.get("user") or {}).get("login") or "").lower()
+    if author not in cfg.allowed_authors:
+        print(f"PR #{number} is by {author}, not one of {', '.join(cfg.allowed_authors)}; skipping.")
+        set_output("skipped", "true")
+        return 0
+    set_output("skipped", "false")
+
+    head_sha, base_ref = pr["head"]["sha"], pr["base"]["ref"]
+    checkout = describe_checkout(cfg.workspace, head_sha, base_ref)
+    print(f"Workspace: {checkout.description}")
+    cfg.test_result_dir.mkdir(parents=True, exist_ok=True)
+    test = run_checks(cfg, cfg.test_result_dir / LOG_FILE)
+    write_test_result(cfg.test_result_dir, pr_number=int(number), head_sha=head_sha, checkout=checkout, test=test)
+    append_summary(f"Test job: `{test.command}` {test.describe()} on {checkout.description}. The review job gives the verdict.")
+    # The result is data for the review job, which gives the verdict and fails the check;
+    # a failing exit here would only skip that job.
+    return 0
+
+
 def review_pr(cfg: Config, gh: GitHub, event: dict) -> int:
     number = cfg.pr_number or (event.get("pull_request") or {}).get("number")
     if not number:
@@ -141,22 +170,54 @@ def review_pr(cfg: Config, gh: GitHub, event: dict) -> int:
             "Use actions/checkout without `ref:` on the pull_request event."
         )
 
-    test = run_checks(cfg, test_log) if cfg.test_command else None
-    if test is None:
-        print("::warning::No test-command set: the verdict can't be a pass without a build and tests.")
-    tools.test_log = test_log if test else None
+    if cfg.mode == "review":
+        # The tests ran in the mode: test job; this job never runs the PR's code.
+        try:
+            result = load_test_result(cfg.test_result_dir, pr_number=int(number), head_sha=head_sha,
+                                      log_tail_lines=LOG_TAIL_LINES)
+        except TestResultError as e:
+            print(f"::warning::No usable test result from the test job: {e}")
+            test, tools.test_log = None, None
+        else:
+            test, tools.test_log = result.check, result.log_path
+            checkout = checkout_for_review(checkout, result.checkout_sha)
+            print(f"Test job: `{test.command}` {test.describe()} on {result.checkout_sha[:7]}")
+    else:
+        if cfg.anthropic_api_key and cfg.test_command:
+            print(
+                "::warning::test-command runs in the same job as the API key, so the PR's code could read "
+                "the key. Prefer two jobs, mode: test and mode: review (see README)."
+            )
+        test = run_checks(cfg, test_log) if cfg.test_command else None
+        if test is None:
+            print("::warning::No test-command set: the verdict can't be a pass without a build and tests.")
+        tools.test_log = test_log if test else None
 
-    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+    user_message = build_user_message(pr, files, test, checkout.description)
     try:
-        outcome = run_review(
-            client,
-            model=cfg.model,
-            effort=cfg.effort,
-            max_turns=cfg.max_turns,
-            system=SYSTEM_PROMPT,
-            user_message=build_user_message(pr, files, test, checkout.description),
-            tools=tools,
-        )
+        if cfg.uses_claude_code:
+            outcome = run_review_cli(
+                oauth_token=cfg.claude_code_oauth_token,
+                model=cfg.model,
+                effort=cfg.effort,
+                max_turns=cfg.max_turns,
+                system=SYSTEM_PROMPT,
+                user_message=user_message,
+                tools=tools,
+                work_dir=cfg.runner_temp / f"dep-review-claude-code-{number}",
+                web_fetch_domains=cfg.web_fetch_domains,
+                claude_bin=cfg.claude_bin,
+            )
+        else:
+            outcome = run_review(
+                anthropic.Anthropic(api_key=cfg.anthropic_api_key),
+                model=cfg.model,
+                effort=cfg.effort,
+                max_turns=cfg.max_turns,
+                system=SYSTEM_PROMPT,
+                user_message=user_message,
+                tools=tools,
+            )
     except ReviewError as e:
         print(f"::warning::Claude review incomplete: {e}")
         outcome = ReviewOutcome(review=None, unavailable_reason=f"Claude's review could not be completed: {e}")
@@ -214,7 +275,9 @@ def review_pr(cfg: Config, gh: GitHub, event: dict) -> int:
     if decision is not None:
         merged = update_auto_merge(
             gh, pr, decision.merge, cfg.auto_merge_method, checkout,
-            retest=lambda base: retest_on_base(cfg, number, head_sha, base),
+            # mode: review never runs the PR's code, so a moved base isn't re-tested here;
+            # merge_directly then leaves the PR for the next run.
+            retest=None if cfg.mode == "review" else (lambda base: retest_on_base(cfg, number, head_sha, base)),
         )
 
     set_output("verdict", verdict.status)
@@ -383,7 +446,12 @@ def main() -> int:
         gh = GitHub(cfg.github_token, cfg.api_url, cfg.repository, cfg.graphql_url)
         event = load_event(cfg)
         if cfg.event_name == "merge_group":
+            if cfg.mode == "review":
+                print("Merge queue: the mode: test job re-runs the tests; nothing to review.")
+                return 0
             return run_merge_queue(cfg, gh, event)
+        if cfg.mode == "test":
+            return run_test_job(cfg, event)
         return review_pr(cfg, gh, event)
     except ConfigError as e:
         print(f"::error::{e}")
