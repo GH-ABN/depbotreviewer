@@ -3,6 +3,6 @@
   "private": true,
   "description": "Pins the Claude Code CLI used by the gate's Claude Code engine. The lockfile pins it and its platform packages by integrity hash.",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.319"
+    "@anthropic-ai/claude-code": "2.1.321"
   }
 }
