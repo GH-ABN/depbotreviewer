@@ -99,6 +99,28 @@ The PR comment says which way it went, for example *"Auto-merge: ✋ no, it's a 
 - **Cooldown:** Dependabot waits a few days before proposing a new release. Most malicious or broken releases are caught and pulled within that time, and this matters more once nobody reviews the merge.
 - **Grouping:** minor and patch updates arrive in one PR per ecosystem, and majors arrive one at a time. One PR means one review and one merge. Separate PRs would each have to be re-tested after every merge.
 
+## Skipping Claude when Dependabot only rebased (optional)
+
+Dependabot rebases every open PR whose lockfile conflicts with the base branch. So each dependency change merged into the base re-runs the gate on every open dependency PR. A major update that needs a code migration then gets the same review, and the same verdict, after every rebase.
+
+With `reuse-blocking-verdict: true`, a run skips Claude when all of these hold:
+
+- the PR's head moved since the last run;
+- the head commit is by the PR's author (Dependabot), committed and verified by GitHub;
+- the PR title, the list of changed files, and each dependency's name, target version, dependency type and update type in Dependabot's commit metadata are unchanged;
+- the reviewer setup is unchanged: `model`, `effort`, the engine (API key or Claude Code) and the reviewer's prompt, which can change when you upgrade the action;
+- the build and tests had the same outcome, and it isn't a failure or a timeout (Claude's analysis explains the failure in that run's log, and after a rebase the tests can fail for another reason);
+- the last review completed (a run that hit an API error or limit is never reused);
+- re-deciding with that review's risk, confidence and untested call sites, plus this run's tests and checkout, still gives `fail` or `needs-human`.
+
+The comment keeps Claude's earlier analysis, says which head it reviewed, and shows this run's test result. The build and tests still run every time.
+
+A `pass` is never reused, because it can turn on auto-merge. Every pass comes from a full review.
+
+The state is a hidden line at the end of the reviewer's comment, signed with a key derived from the Claude credential, together with the repository and PR number. It is read only from a comment written by a bot account, such as the default `GITHUB_TOKEN`'s `github-actions[bot]`, and only if the signature verifies. So another bot, or a person editing the comment, can't forge it, and even a forged state could only keep a PR blocked. The option needs `post-comment: true`. With a personal access token as `github-token`, nothing is reused.
+
+To force a full review, re-run the job. Deleting the reviewer's comment, changing the reviewer setup, or rotating the Claude credential also makes the next run a full review.
+
 ## Ticket text for Linear or Jira
 
 When a PR fails the gate, the PR comment ends with a collapsed **📋 Ticket text** section. It holds a title and a Markdown description, each in its own code block, so GitHub's copy button grabs either one in a click. Paste them into Linear, Jira or any other tracker: both Linear and Jira Cloud turn pasted Markdown into formatted text.
@@ -134,8 +156,9 @@ No tracker credentials are needed, because the action never calls Linear or Jira
 | `allowed-authors` | `dependabot[bot]` | Comma-separated PR authors to gate. Add `renovate[bot]` for Renovate. |
 | `pr-number` | (from the event) | Set this when running from `workflow_dispatch`. |
 | `ticket-on` | `fail` | Which verdicts add ticket text for Linear or Jira to the PR comment: `fail`, `needs-human` or `never`. |
+| `reuse-blocking-verdict` | `false` | Skip Claude when Dependabot only rebased a PR that the last review blocked. See [Skipping Claude when Dependabot only rebased](#skipping-claude-when-dependabot-only-rebased-optional). |
 
-**Outputs:** `verdict` (`pass`, `needs-human` or `fail`), `risk` (`low`, `medium`, `high` or `unknown`), `confidence`, `skipped`, `auto-merge` (whether the PR qualified) and `merged` (whether this run merged it).
+**Outputs:** `verdict` (`pass`, `needs-human` or `fail`), `risk` (`low`, `medium`, `high` or `unknown`), `confidence`, `skipped` (`true` when the PR's author isn't allowed, which passes, or when the run is for an older head than the PR's current one, which fails), `auto-merge` (whether the PR qualified) and `merged` (whether this run merged it).
 
 ## Security
 
@@ -149,7 +172,7 @@ No tracker credentials are needed, because the action never calls Linear or Jira
 
 ## Cost
 
-Each review is one Claude conversation of about 5–30 turns. The conversation is prompt-cached, so each turn re-reads earlier context at the cache rate. Token usage is printed in the job log. Merge-queue runs don't call Claude. To spend less, lower `effort` or `max-turns`.
+Each review is one Claude conversation of about 5–30 turns. The conversation is prompt-cached, so each turn re-reads earlier context at the cache rate. Token usage is printed in the job log. Merge-queue runs don't call Claude. To spend less, lower `effort` or `max-turns`, or turn on `reuse-blocking-verdict` so a rebase doesn't re-review an update that was already blocked.
 
 ## Requirements
 

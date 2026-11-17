@@ -121,6 +121,15 @@ inputs:
     description: PR number. Defaults to the PR in the triggering event (set it for workflow_dispatch).
     required: false
     default: ""
+  reuse-blocking-verdict:
+    description: >-
+      Skip Claude when Dependabot only rebased a PR that the last review blocked: same
+      update, same build and test outcome. The verdict is re-decided with this run's tests,
+      and a pass is never reused. Re-run the job to force a full review. Needs
+      post-comment, a bot account's github-token (the default GITHUB_TOKEN) and the Claude
+      credential, which signs the saved state.
+    required: false
+    default: "false"
   ticket-on:
     description: >-
       Which verdicts add ready-to-paste ticket text (title and Markdown description for
@@ -140,7 +149,9 @@ outputs:
     description: "Claude's confidence in the verdict: low, medium or high."
     value: ${{ steps.review.outputs.confidence }}
   skipped:
-    description: "true when the PR was not by an allowed author."
+    description: >-
+      true when the PR was not by an allowed author (the check passes), or when the run
+      is for an older head than the PR's current one (the check fails; nothing is changed).
     value: ${{ steps.review.outputs.skipped }}
   auto-merge:
     description: "true when the PR qualified for auto-merge."
@@ -230,6 +241,7 @@ runs:
         INPUT_ALLOWED_AUTHORS: ${{ inputs.allowed-authors }}
         INPUT_PR_NUMBER: ${{ inputs.pr-number }}
         INPUT_TICKET_ON: ${{ inputs.ticket-on }}
+        INPUT_REUSE_BLOCKING_VERDICT: ${{ inputs.reuse-blocking-verdict }}
       # -P stops Python from putting the working directory (the PR's code) on sys.path,
       # so a file in the reviewed repo cannot shadow one of the reviewer's imports.
       run: |

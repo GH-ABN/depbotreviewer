@@ -45,12 +45,21 @@ class Verdict:
     reasons: list[str]
 
 
-def decide(outcome: ReviewOutcome, test: CheckRun | None, checkout: Checkout) -> Verdict:
+NO_TESTS = "no build or tests were run (set `test-command`)"
+
+
+def decide(outcome: ReviewOutcome, test: CheckRun | None, checkout: Checkout,
+           no_test_reason: str | None = None) -> Verdict:
+    """Turn the evidence into a verdict; only passing tests on the merge result can give a pass.
+
+    `no_test_reason` says why `test` is None when tests ran but their result was not usable.
+    """
     fail: list[str] = []
     human: list[str] = []
 
     if test is None:
-        human.append("No build or tests were run (set `test-command`), so nothing proves the update works.")
+        why = no_test_reason or NO_TESTS
+        human.append(f"{why[0].upper()}{why[1:]}, so nothing proves the update works.")
     elif test.timed_out:
         fail.append(f"`{test.command}` timed out.")
     elif not test.passed:
@@ -108,6 +117,40 @@ UPDATE_TYPES = ("patch", "minor", "major")
 #     update-type: version-update:semver-minor
 _UPDATE_TYPE = re.compile(r"^\s*update-type:\s*version-update:semver-(patch|minor|major)\s*$", re.M)
 _DEP_NAME = re.compile(r"^\s*-\s*dependency-name:\s*(\S+)", re.M)
+_METADATA_FIELDS = ("dependency-name", "dependency-version", "dependency-type", "update-type")
+
+
+def parse_update_entries(commit_message: str) -> list[dict[str, str]] | None:
+    """Each dependency in the commit's `updated-dependencies:` block, with all four fields above.
+
+    Stricter than parse_dependabot_metadata: the block must end with Dependabot's `...`
+    line, and an entry with a missing or repeated field makes the whole block None.
+    """
+    lines = (commit_message or "").splitlines()
+    try:
+        start = [line.strip() for line in lines].index("updated-dependencies:") + 1
+    except ValueError:
+        return None
+    entries: list[dict[str, str]] = []
+    for line in lines[start:]:
+        text = line.strip()
+        if text == "...":
+            if not entries or any(set(e) != set(_METADATA_FIELDS) for e in entries):
+                return None
+            return entries
+        if text.startswith("- "):
+            entries.append({})
+            text = text[2:].strip()
+        key, sep, value = text.partition(":")
+        if not sep or not entries:
+            return None
+        key, value = key.strip(), value.strip().strip("'\"")
+        if key == "dependency-group":
+            continue
+        if key not in _METADATA_FIELDS or key in entries[-1] or not value:
+            return None
+        entries[-1][key] = value
+    return None  # no closing "..."
 
 
 @dataclass(frozen=True)

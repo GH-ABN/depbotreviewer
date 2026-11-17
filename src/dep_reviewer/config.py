@@ -79,6 +79,7 @@ class Config:
     claude_bin: str = "claude"
     web_fetch_domains: tuple[str, ...] = DEFAULT_WEB_FETCH_DOMAINS
     mode: str = "all"
+    reuse_blocking_verdict: bool = False
     test_result_dir: Path = Path("/tmp/dep-review-test-result")
 
     @property
@@ -194,6 +195,7 @@ class Config:
             claude_bin=env.get("DEP_REVIEWER_CLAUDE_BIN") or "claude",
             web_fetch_domains=domains,
             mode=mode,
+            reuse_blocking_verdict=_bool(inp("REUSE_BLOCKING_VERDICT", "false"), "reuse-blocking-verdict"),
             test_result_dir=Path(env.get("RUNNER_TEMP") or "/tmp") / "dep-review-test-result",
         )
 

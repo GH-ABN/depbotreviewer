@@ -74,12 +74,19 @@ class GitHub:
                 return comments
             page += 1
 
-    def upsert_comment(self, number: int, body: str, marker: str) -> str:
-        """Update the comment containing `marker`, or create one. Returns its URL."""
+    def find_comment(self, number: int, marker: str) -> dict | None:
+        """The first comment containing `marker`: the one upsert_comment updates."""
         for c in self._list_comments(number):
             if marker in (c.get("body") or ""):
-                updated = self._request("PATCH", self._repo(f"/issues/comments/{c['id']}"), {"body": body})
-                return updated["html_url"]
+                return c
+        return None
+
+    def upsert_comment(self, number: int, body: str, marker: str) -> str:
+        """Update the comment containing `marker`, or create one. Returns its URL."""
+        existing = self.find_comment(number, marker)
+        if existing is not None:
+            updated = self._request("PATCH", self._repo(f"/issues/comments/{existing['id']}"), {"body": body})
+            return updated["html_url"]
         created = self._request("POST", self._repo(f"/issues/{number}/comments"), {"body": body})
         return created["html_url"]
 
@@ -144,8 +151,11 @@ class GitHub:
                 failed.append(f"{status['context']} ({status['state']})")
         return pending, failed
 
+    def get_commit(self, sha: str) -> dict:
+        return self._request("GET", self._repo(f"/commits/{sha}"))
+
     def get_commit_message(self, sha: str) -> str:
-        return self._request("GET", self._repo(f"/commits/{sha}"))["commit"]["message"]
+        return self.get_commit(sha)["commit"]["message"]
 
     def merge_pr(self, number: int, head_sha: str, method: str) -> None:
         """Merge now. GitHub refuses (409) if the head is no longer `head_sha`."""

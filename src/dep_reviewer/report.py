@@ -7,13 +7,23 @@ import urllib.parse
 from dataclasses import dataclass
 
 from .claude_review import ReviewOutcome
-from .gate import FAIL, NEEDS_HUMAN, PASS, Checkout, Verdict
+from .gate import FAIL, NEEDS_HUMAN, NO_TESTS, PASS, Checkout, Verdict
 from .prompts import CheckRun
 
-COMMENT_MARKER = "<!-- claude-dependabot-reviewer -->"
-# GitHub rejects comments over 65,536 characters.
+MARKER_PREFIX = "<!-- claude-dependabot-reviewer"
+COMMENT_MARKER = f"{MARKER_PREFIX} -->"
+# Claude's analysis sits between these, so a run that reuses the verdict can carry it over
+# (see reuse.py); the state line for that run is the last line of the comment.
+ANALYSIS_MARKER = f"{MARKER_PREFIX}:analysis -->"
+ANALYSIS_END = f"{MARKER_PREFIX}:analysis-end -->"
+STATE_PREFIX = f"{MARKER_PREFIX}:state "
+STATE_SUFFIX = " -->"
+GITHUB_COMMENT_LIMIT = 65_536  # GitHub rejects longer comments
+# The rendered review's budget; the auto-merge line, ticket text and state line come after.
 MAX_COMMENT_CHARS = 60_000
 MAX_ROWS = 40
+# Room kept in a reused comment for the auto-merge line, ticket text and state line.
+REUSED_HEADROOM = 10_000
 
 VERDICT_HEADING = {
     PASS: "✅ Verified: safe to merge",
@@ -39,11 +49,17 @@ class RenderContext:
     checkout: Checkout
     test: CheckRun | None
     run_url: str | None = None
+    no_test_reason: str | None = None  # why `test` is None, when tests ran but their result was not usable
 
 
 def neutralize(text: str) -> str:
-    """Stop model-written text from @-mentioning people or teams."""
-    return re.sub(r"@(?=[A-Za-z0-9_-])", "@​", text)
+    """Stop model-written text from @-mentioning people or teams, or writing an HTML comment
+    (such as the reviewer's own hidden markers).
+
+    Both are broken with a zero-width space rather than an HTML entity: the text also goes
+    into code blocks (the ticket text), where GitHub shows and copies entities literally.
+    """
+    return re.sub(r"@(?=[A-Za-z0-9_-])", "@​", text).replace("<!--", "<​!--")
 
 
 def cell(text: str) -> str:
@@ -64,22 +80,29 @@ def _safe_url(url: str) -> str:
     return url if re.match(r"^https?://[^\s)]+$", url) else ""
 
 
-def render_comment(outcome: ReviewOutcome, verdict: Verdict, ctx: RenderContext, max_rows: int = MAX_ROWS) -> str:
-    out: list[str] = [COMMENT_MARKER, f"## {VERDICT_HEADING[verdict.status]}", ""]
-    out += [f"- {neutralize(r)}" for r in verdict.reasons]
-    out.append("")
-
-    tested = "no build or tests run"
+def _tested(ctx: RenderContext) -> str:
     if ctx.test is not None:
-        tested = f"`{ctx.test.command}` {ctx.test.describe()}"
-    out += [f"**Tested:** {tested}, on {ctx.checkout.description}.  ", f"**Claude risk rating:** {RISK[outcome.risk]}"]
+        return f"`{ctx.test.command}` {ctx.test.describe()}"
+    return ctx.no_test_reason or NO_TESTS
+
+
+def _header(verdict: Verdict, ctx: RenderContext) -> list[str]:
+    """The verdict heading, its reasons and the Tested line; the risk line follows."""
+    out = [COMMENT_MARKER, f"## {VERDICT_HEADING[verdict.status]}", ""]
+    out += [f"- {neutralize(r)}" for r in verdict.reasons]
+    out += ["", f"**Tested:** {_tested(ctx)}, on {ctx.checkout.description}.  "]
+    return out
+
+
+def render_comment(outcome: ReviewOutcome, verdict: Verdict, ctx: RenderContext, max_rows: int = MAX_ROWS) -> str:
+    out = _header(verdict, ctx) + [f"**Claude risk rating:** {RISK[outcome.risk]}"]
     r = outcome.review
     if r is not None:
         out[-1] += f" (confidence: {r['confidence']})"
     out.append("")
 
     if r is not None:
-        out += [neutralize(r["summary"]).strip(), ""]
+        out += [ANALYSIS_MARKER, neutralize(r["summary"]).strip(), ""]
 
         if r["dependencies"]:
             out += ["### Updates", "", "| Package | Ecosystem | From | To | Type | Scope |", "|---|---|---|---|---|---|"]
@@ -123,6 +146,7 @@ def render_comment(outcome: ReviewOutcome, verdict: Verdict, ctx: RenderContext,
             out += ["### Recommendations", ""]
             out += [f"- {neutralize(x).strip()}" for x in r["recommendations"]]
             out.append("")
+        out += [ANALYSIS_END, ""]
 
     footer = f"<sub>Reviewed by {cell(ctx.model)} in {outcome.turns} turns"
     if ctx.run_url:
@@ -134,3 +158,31 @@ def render_comment(outcome: ReviewOutcome, verdict: Verdict, ctx: RenderContext,
     if len(body) > MAX_COMMENT_CHARS and max_rows > 5:
         return render_comment(outcome, verdict, ctx, max_rows=max_rows // 2)
     return body
+
+
+def render_reused_comment(verdict: Verdict, ctx: RenderContext, risk: str, confidence: str,
+                          reviewed_sha: str, analysis: str) -> str:
+    """The comment for a run that reused an earlier blocking verdict (see reuse.py).
+
+    `analysis` is the signed analysis section of the earlier comment, carried over; the
+    heading, reasons and test line describe this run.
+    """
+    out = _header(verdict, ctx) + [
+        f"**Claude risk rating:** {RISK[risk]} (confidence: {confidence}), from the review of `{reviewed_sha[:7]}`",
+        "",
+        "> Dependabot rebased this PR without changing the update, and the tests had the same outcome, "
+        f"so Claude was not asked again. The analysis below is from the review of `{reviewed_sha[:7]}`. "
+        "To force a full review, re-run the job.",
+        "",
+    ]
+    footer = "<sub>Verdict re-decided with this run's tests"
+    if ctx.run_url:
+        footer += f" · [workflow run]({ctx.run_url})"
+    footer += ". A pass is never reused: it always comes from a full review.</sub>"
+    # Leave room for the auto-merge line, ticket text and state line added after this.
+    room = MAX_COMMENT_CHARS - len("\n".join(out)) - len(footer) - REUSED_HEADROOM
+    carried = neutralize(analysis)
+    if len(carried) > room:
+        carried = carried[:max(room, 0)].rstrip() + "\n\n_Analysis truncated; see the earlier workflow run._"
+    out += [ANALYSIS_MARKER, carried, ANALYSIS_END, "", footer]
+    return "\n".join(out)

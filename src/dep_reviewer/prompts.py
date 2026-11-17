@@ -117,7 +117,8 @@ def is_lockfile(path: str) -> bool:
     return PurePosixPath(path).name.lower() in LOCKFILE_NAMES
 
 
-def build_user_message(pr: dict, files: list[dict], test: CheckRun | None, checkout: str) -> str:
+def build_user_message(pr: dict, files: list[dict], test: CheckRun | None, checkout: str,
+                       no_test_reason: str | None = None) -> str:
     parts: list[str] = []
     parts.append(
         "Review this dependency update pull request.\n\n"
@@ -154,7 +155,9 @@ def build_user_message(pr: dict, files: list[dict], test: CheckRun | None, check
     if inline:
         parts.append("Diffs of the non-lockfile changes:\n" + "\n\n".join(inline))
 
-    if test is None:
+    if test is None and no_test_reason:
+        parts.append(f"Tests: no usable result for this review ({no_test_reason}).")
+    elif test is None:
         parts.append("Tests: not run for this review (no test-command was configured).")
     else:
         parts.append(
